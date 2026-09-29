@@ -1,0 +1,12 @@
+diff --git a/packages/core/src/core/coreToolScheduler.test.ts b/packages/core/src/core/coreToolScheduler.test.ts
+--- a/packages/core/src/core/coreToolScheduler.test.ts
++++ b/packages/core/src/core/coreToolScheduler.test.ts
+@@ -12571,7 +12571,7 @@
+     const functionResponse =
+       completedCall.response.responseParts[0].functionResponse;
+     expect(functionResponse?.response?.['error']).toBe(
+-      `[Operation Cancelled] Reason: ${cancellationReason}`,
++      `[Operation Cancelled] Reason: ${cancellationReason} Stop and await further instructions; do not retry or work around it.`,
+     );
+   });
+ });
