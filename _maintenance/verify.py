@@ -37,6 +37,9 @@ SPECS = {
         'files': ['packages/core/src/core/coreToolScheduler.ts', 'packages/core/src/core/coreToolScheduler.test.ts', 'packages/cli/vitest.config.ts'],
     },
 }
+extra = CONTROL / '_maintenance' / 'specs.json'
+if extra.exists():
+    SPECS.update(json.loads(extra.read_text()))
 SPEC = SPECS[NUMBER]
 
 
@@ -82,24 +85,6 @@ def verify_pr():
     return pr
 
 
-def prepare():
-    save('pr-before.json', verify_pr())
-    main = api(f'repos/{UPSTREAM}/git/ref/heads/main')['object']['sha']
-    branch = f'repair/integration-{NUMBER}-{os.environ["GITHUB_RUN_ID"]}'
-    save('integration-request.json', {'branch': branch, 'head': EXPECTED, 'upstream': main})
-    api(f'repos/{FORK}/git/refs', 'POST', ref='refs/heads/' + branch, sha=EXPECTED)
-    merge = api(f'repos/{FORK}/merges', 'POST', base=branch, head=main,
-                commit_message=f'Merge current upstream for PR #{NUMBER} validation')
-    integration = merge['sha'] if merge else EXPECTED
-    save('integration.json', {'sha': integration, 'upstream': main, 'branch': branch})
-    run(['git', 'fetch', '--no-tags', '--depth=2', 'origin', branch], 'fetch-integration', CONTROL)
-    assert capture(['git', 'rev-parse', 'FETCH_HEAD']) == integration
-    run(['git', 'worktree', 'add', '--detach', str(WORK), integration], 'checkout-integration', CONTROL)
-    assert capture(['git', 'hash-object', str(PATCH)]) == os.environ['PATCH_BLOB']
-    run(['git', 'apply', '--check', str(PATCH)], 'patch-preflight')
-    run(['git', 'apply', '--include=' + SPEC['red_file'], str(PATCH)], 'apply-regression')
-
-
 def install():
     run(['corepack', 'enable'], 'corepack')
     run(['corepack', 'pnpm', 'install', '--frozen-lockfile'], 'install')
@@ -124,15 +109,23 @@ def fix():
 
 
 def build():
-    run(['npm', 'run', 'build'], 'build')
-    run(['npm', 'run', 'typecheck', '--workspace', SPEC['typecheck']], 'typecheck')
+    command = ['npm', 'run', 'build']
+    if SPEC.get('build_workspace'):
+        command += ['--workspace', SPEC['build_workspace']]
+    run(command, 'build')
+    if SPEC.get('typecheck'):
+        run(['npm', 'run', 'typecheck', '--workspace', SPEC['typecheck']], 'typecheck')
     if NUMBER == '10251':
         run(['npm', 'run', 'bundle'], 'bundle')
 
 
 def green():
-    run(['npx', '--no-install', 'vitest', 'run', *SPEC['tests'], '--maxWorkers', '2', '--reporter=default', '--reporter=json', '--outputFile.json=' + str(OUT/'green.json')], 'green', WORK/SPEC['package'])
-    run(['npx', '--no-install', 'eslint', '--max-warnings', '0', *SPEC['files']], 'lint')
+    suites = SPEC.get('test_suites', [{'package': SPEC['package'], 'tests': SPEC['tests']}])
+    for index, suite in enumerate(suites):
+        name = 'green' if index == 0 else f'green-{index}'
+        run(['npx', '--no-install', 'vitest', 'run', *suite['tests'], '--maxWorkers', '2', '--reporter=default', '--reporter=json', '--outputFile.json=' + str(OUT/(name+'.json'))], name, WORK/suite['package'])
+    lint_files = [p for p in SPEC['files'] if p.endswith(('.ts', '.tsx', '.js', '.jsx', '.mjs'))]
+    run(['npx', '--no-install', 'eslint', '--max-warnings', '0', *lint_files], 'lint')
     if NUMBER == '10251':
         run(['node', 'dist/cli.js', 'review', 'publish-assets', '--help'], 'cli-help')
         view = json.loads(capture(['gh', 'repo', 'view', FORK, '--json', 'owner,name,url,parent'], WORK))
@@ -140,21 +133,6 @@ def green():
         save('real-gh-probe.json', view)
 
 
-def publish():
-    verify_pr()
-    changed = set(capture(['git', 'diff', '--name-only'], WORK).splitlines())
-    assert changed and changed <= set(SPEC['files']), changed
-    run(['git', 'diff', '--check'], 'final-diff-check')
-    run(['git', 'config', 'user.name', 'Yu Zhang'], 'git-name')
-    run(['git', 'config', 'user.email', '34849476+AaronZ345@users.noreply.github.com'], 'git-email')
-    run(['git', 'add', *SPEC['files']], 'stage')
-    run(['git', 'commit', '-m', SPEC['message']], 'commit')
-    sha = capture(['git', 'rev-parse', 'HEAD'], WORK)
-    branch = f'repair/validated-{NUMBER}-{os.environ["GITHUB_RUN_ID"]}'
-    run(['git', 'push', 'origin', f'HEAD:refs/heads/{branch}'], 'push-candidate')
-    save('result.json', {'pr': NUMBER, 'original_head': EXPECTED, 'candidate_sha': sha, 'candidate_branch': branch, 'verified': True, 'original_pr_updated': False})
-
-
 if __name__ == '__main__':
-    phases = {'prepare': prepare, 'install': install, 'red': red, 'fix': fix, 'build': build, 'green': green, 'publish': publish}
+    phases = {'install': install, 'red': red, 'fix': fix, 'build': build, 'green': green}
     phases[sys.argv[1]]()
