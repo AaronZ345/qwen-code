@@ -1,0 +1,127 @@
+diff --git a/packages/cli/vitest.config.ts b/packages/cli/vitest.config.ts
+index ebaea46..a948720 100644
+--- a/packages/cli/vitest.config.ts
++++ b/packages/cli/vitest.config.ts
+@@ -238,15 +238,6 @@ export default defineConfig({
+     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+       ? '25%'
+-      : process.env.CI
+-        ? 2
+-        : undefined,
+-    poolOptions: process.env.CI
+-      ? {
+-          threads: {
+-            maxThreads: 2,
+-          },
+-        }
+       : undefined,
+     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
+     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
+diff --git a/packages/core/src/core/coreToolScheduler.test.ts b/packages/core/src/core/coreToolScheduler.test.ts
+index cbcb1e0..f90af28 100644
+--- a/packages/core/src/core/coreToolScheduler.test.ts
++++ b/packages/core/src/core/coreToolScheduler.test.ts
+@@ -14837,9 +14837,10 @@ describe('CoreToolScheduler telemetry spans', () => {
+     expect(completedCall.response.executionStatus).toBe('cancelled');
+     const responseText = JSON.stringify(completedCall.response.responseParts);
+     expect(responseText).toContain(
+-      'User intentionally cancelled this tool call.',
++      'This tool call was cancelled before it completed.',
+     );
+     expect(responseText).not.toContain('had already completed');
++    expect(responseText).not.toContain('User intentionally cancelled');
+     expect(responseText).toContain(
+       'Stop and await further instructions; do not retry or work around it.',
+     );
+@@ -14860,9 +14861,7 @@ describe('CoreToolScheduler telemetry spans', () => {
+     expect(completedCall.response.executionStatus).toBe('cancelled');
+     const responseText = JSON.stringify(completedCall.response.responseParts);
+     expect(responseText).toContain('The tool had already completed');
+-    expect(responseText).not.toContain(
+-      'User intentionally cancelled this tool call. Stop',
+-    );
++    expect(responseText).not.toContain('User intentionally cancelled');
+     expect(responseText).toContain(
+       'Stop and await further instructions; do not retry or work around it.',
+     );
+@@ -15296,6 +15295,48 @@ describe('CoreToolScheduler telemetry spans', () => {
+     ).length;
+   }
+ 
++  it.each([
++    ['explicit cancellation', ToolConfirmationOutcome.Cancel, undefined],
++    ['host cancellation', ToolConfirmationOutcome.Cancel, 'Approval timed out.'],
++  ] as const)('adds the stop directive after %s at confirmation', async (_label, outcome, reason) => {
++    const execute = vi.fn().mockResolvedValue({ llmContent: 'unexpected', returnDisplay: 'unexpected' });
++    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk({
++      messageBus: askMessageBus(),
++      execute,
++    });
++    const waiting = (await waitForStatus(onToolCallsUpdate, 'awaiting_approval')) as WaitingToolCall;
++    await waiting.confirmationDetails.onConfirm(outcome, reason ? { cancelMessage: reason } : undefined);
++    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
++    const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as CompletedToolCall[];
++    expect(completed[0].status).toBe('cancelled');
++    expect(completed[0].response.executionStatus).toBe('not_started');
++    expect(execute).not.toHaveBeenCalled();
++    const text = JSON.stringify(completed[0].response.responseParts);
++    expect(text).toContain(reason ?? 'User did not allow tool call');
++    expect(text).toContain('Stop and await further instructions; do not retry or work around it.');
++  });
++
++  it('does not attribute a confirmation-time system abort to the user', async () => {
++    const execute = vi.fn().mockResolvedValue({ llmContent: 'unexpected', returnDisplay: 'unexpected' });
++    const abortController = new AbortController();
++    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk({
++      messageBus: askMessageBus(),
++      execute,
++      abortController,
++    });
++    const waiting = (await waitForStatus(onToolCallsUpdate, 'awaiting_approval')) as WaitingToolCall;
++    abortController.abort(new Error('run budget exhausted'));
++    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
++    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
++    const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as CompletedToolCall[];
++    expect(completed[0].status).toBe('cancelled');
++    expect(execute).not.toHaveBeenCalled();
++    const text = JSON.stringify(completed[0].response.responseParts);
++    expect(text).not.toContain('User did not allow');
++    expect(text).not.toContain('User intentionally cancelled');
++    expect(text).toContain('Stop and await further instructions; do not retry or work around it.');
++  });
++
+   it('bounces a PreToolUse ask to awaiting_approval with an info confirmation', async () => {
+     const messageBus = askMessageBus('confirm deploy 38111');
+     const { onToolCallsUpdate } = await scheduleWithAsk({ messageBus });
+diff --git a/packages/core/src/core/coreToolScheduler.ts b/packages/core/src/core/coreToolScheduler.ts
+index feadd00..e589114 100644
+--- a/packages/core/src/core/coreToolScheduler.ts
++++ b/packages/core/src/core/coreToolScheduler.ts
+@@ -450,8 +450,8 @@ const TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE = `This tool call was cancelled be
+ //
+ // Both messages include an explicit stop directive so the model does not
+ // misattribute the cancellation as a transient fault and retry (#10170).
+-const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE = `User intentionally cancelled this tool call. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+-const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE = `The tool had already completed; its output was discarded. User intentionally cancelled. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
++const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE = `This tool call was cancelled before it completed. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
++const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE = `The tool had already completed; its output was discarded. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+ 
+ /**
+  * Builds the failure ToolResult surfaced when a tool call exceeds the
+@@ -4583,9 +4583,12 @@ export class CoreToolScheduler {
+     this.recordAutoModeFallbackResolution(callId, outcome);
+ 
+     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
+-      // Use custom cancel message from payload if provided, otherwise use default
+-      const cancelMessage =
+-        payload?.cancelMessage || 'User did not allow tool call';
++      const reason =
++        payload?.cancelMessage ||
++        (outcome === ToolConfirmationOutcome.Cancel
++          ? 'User did not allow tool call.'
++          : 'This tool call was cancelled before it ran.');
++      const cancelMessage = `${reason} ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+       this.setStatusInternal(callId, 'cancelled', cancelMessage, 'not_started');
+       // Tool span is cancelled too — finalize it via setToolSpanCancelled
+       // before pulling it out of the map so the status survives end().
