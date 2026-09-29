@@ -1,4 +1,4 @@
-name: PR maintenance source snapshots
+name: PR maintenance verified repairs
 
 on:
   push:
@@ -6,92 +6,127 @@ on:
       - repair/pr-maintenance-20260929
 
 permissions:
-  contents: read
-
-concurrency:
-  group: pr-maintenance-snapshots-${{ github.run_id }}
-  cancel-in-progress: false
+  contents: write
 
 jobs:
-  snapshot:
+  repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NO_COLOR: '1'
+      TERM: dumb
+      EXPECTED_HEAD: 478a913d184bc60183de320117908ae998cbfbd0
+      HEAD_BRANCH: fix/10239-publish-assets-self-guard
+      PR_NUMBER: '10251'
     steps:
-      - name: Collect exact upstream and PR snapshots
+      - uses: actions/checkout@v4
+        with:
+          path: control
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify original head and check out the current integration tree
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/repair-result"
+          gh api "repos/QwenLM/qwen-code/pulls/$PR_NUMBER" > "$RUNNER_TEMP/repair-result/pr-before.json"
+          jq -e --arg sha "$EXPECTED_HEAD" --arg branch "$HEAD_BRANCH" '.state == "open" and .head.sha == $sha and .head.ref == $branch and .head.repo.full_name == "AaronZ345/qwen-code"' "$RUNNER_TEMP/repair-result/pr-before.json"
+          MAIN_SHA=$(gh api repos/QwenLM/qwen-code/git/ref/heads/main --jq .object.sha)
+          git -C control fetch --no-tags --depth=2 https://github.com/QwenLM/qwen-code.git "refs/pull/$PR_NUMBER/merge"
+          MERGE_SHA=$(git -C control rev-parse FETCH_HEAD)
+          test "$(git -C control rev-parse "$MERGE_SHA^2")" = "$EXPECTED_HEAD"
+          test "$(git -C control rev-parse "$MERGE_SHA^1")" = "$MAIN_SHA"
+          git -C control worktree add --detach "$GITHUB_WORKSPACE/candidate" "$MERGE_SHA"
+          printf '%s\n' "$MAIN_SHA" > "$RUNNER_TEMP/repair-result/upstream-sha.txt"
+          printf '%s\n' "$MERGE_SHA" > "$RUNNER_TEMP/repair-result/integration-sha.txt"
+          test "$(git hash-object control/_maintenance/patches/10251.patch)" = 026bee18ca60e65f092124d2955039f405c3bc44
+          git -C candidate apply --check "$GITHUB_WORKSPACE/control/_maintenance/patches/10251.patch"
+          git -C candidate apply --include=packages/cli/src/commands/review/publish-assets.test.ts "$GITHUB_WORKSPACE/control/_maintenance/patches/10251.patch"
+      - name: Install pinned dependencies and build workspaces
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/repair-result/install.log"
+      - name: Verify the regression test fails before the fix
+        working-directory: candidate/packages/cli
+        shell: bash
+        run: |
+          set -uo pipefail
+          npx --no-install vitest run src/commands/review/publish-assets.test.ts -t 'folds --reviewed-repo' --maxWorkers 2 --reporter=json --outputFile="$RUNNER_TEMP/repair-result/red.json" > "$RUNNER_TEMP/repair-result/red.log" 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
           python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import tempfile
-
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr-snapshots'
-          out.mkdir()
-          targets = {
-              'QwenLM/qwen-code': [9541, 9921, 10251, 10280, 10279],
-              'chenhg5/cc-connect': [1817, 1801, 1816, 1800, 1886],
-              'agentscope-ai/QwenPaw': [6874],
-              'volcengine/OpenViking': [3504, 4396],
-          }
-          manifest = {}
-          for repo, numbers in targets.items():
-              destination = out / repo.replace('/', '__')
-              destination.mkdir()
-              work = pathlib.Path(tempfile.mkdtemp(prefix='pr-source-'))
-              def git(*args):
-                  return subprocess.check_output(['git', '-C', str(work), *args], text=True).strip()
-              def api(path, paginated=False):
-                  args = ['gh', 'api', path]
-                  if paginated:
-                      args += ['--paginate', '--slurp']
-                  return json.loads(subprocess.check_output(args, text=True))
-              git('init', '--quiet')
-              git('remote', 'add', 'upstream', 'https://github.com/' + repo + '.git')
-              metadata = api('repos/' + repo)
-              git('fetch', '--quiet', '--no-tags', '--depth=1', 'upstream', metadata['default_branch'])
-              base = git('rev-parse', 'FETCH_HEAD')
-              with (destination / 'upstream.tar.gz').open('wb') as stream:
-                  subprocess.run(['git', '-C', str(work), 'archive', '--format=tar.gz', base], stdout=stream, check=True)
-              state = {'upstream_sha': base, 'default_branch': metadata['default_branch'], 'prs': {}}
-              for number in numbers:
-                  pr = api(f'repos/{repo}/pulls/{number}')
-                  prefix = destination / str(number)
-                  prefix.mkdir()
-                  (prefix / 'pr.json').write_text(json.dumps(pr, indent=2))
-                  sha = pr['head']['sha']
-                  git('fetch', '--quiet', '--no-tags', '--depth=1', 'upstream', f'refs/pull/{number}/head')
-                  if git('rev-parse', 'FETCH_HEAD') != sha:
-                      raise RuntimeError(f'{repo}#{number} changed during snapshot; refusing a mixed snapshot')
-                  with (prefix / 'from-upstream.patch').open('wb') as stream:
-                      subprocess.run(['git', '-C', str(work), 'diff', '--binary', base, sha], stdout=stream, check=True)
-                  for label, path in {
-                      'reviews': f'repos/{repo}/pulls/{number}/reviews',
-                      'review-comments': f'repos/{repo}/pulls/{number}/comments',
-                      'conversation': f'repos/{repo}/issues/{number}/comments',
-                      'files': f'repos/{repo}/pulls/{number}/files',
-                      'commits': f'repos/{repo}/pulls/{number}/commits',
-                  }.items():
-                      (prefix / (label + '.json')).write_text(json.dumps(api(path, True), indent=2))
-                  state['prs'][str(number)] = {
-                      'head_sha': sha,
-                      'head_repo': pr['head']['repo']['full_name'],
-                      'head_ref': pr['head']['ref'],
-                      'state': pr['state'],
-                      'updated_at': pr['updated_at'],
-                  }
-                  print(f'{repo}#{number}: {sha}', flush=True)
-              manifest[repo] = state
-          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+          import json, os, pathlib
+          result=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'repair-result/red.json').read_text())
+          failures=[a for f in result['testResults'] for a in f['assertionResults'] if a['status']=='failed']
+          assert len(failures)==1, failures
+          assert 'folds --reviewed-repo' in failures[0]['fullName'], failures
+          assert '--repo' in '\n'.join(failures[0]['failureMessages']), failures
+          print('Confirmed: the regression detects the invalid gh argument before the fix.')
           PY
+      - name: Apply the implementation and format changed files
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --exclude=packages/cli/src/commands/review/publish-assets.test.ts "$GITHUB_WORKSPACE/control/_maintenance/patches/10251.patch"
+          npx --no-install prettier --write packages/cli/src/commands/review/publish-assets.ts packages/cli/src/commands/review/publish-assets.test.ts packages/cli/src/commands/review/lib/platform/github.ts packages/cli/src/commands/review/lib/platform/github.test.ts packages/cli/vitest.config.ts
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/repair-result/fix.patch"
+      - name: Build and type-check the fixed implementation
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$RUNNER_TEMP/repair-result/build.log"
+          npm run typecheck --workspace packages/cli 2>&1 | tee "$RUNNER_TEMP/repair-result/typecheck.log"
+          npm run bundle 2>&1 | tee "$RUNNER_TEMP/repair-result/bundle.log"
+      - name: Run the affected regression suites
+        working-directory: candidate/packages/cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --no-install vitest run src/commands/review/publish-assets.test.ts src/commands/review/lib/platform/github.test.ts --maxWorkers 2 --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/repair-result/green.json" 2>&1 | tee "$RUNNER_TEMP/repair-result/green.log"
+      - name: Lint and smoke-test the built CLI and real gh syntax
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --no-install eslint --max-warnings 0 packages/cli/src/commands/review/publish-assets.ts packages/cli/src/commands/review/publish-assets.test.ts packages/cli/src/commands/review/lib/platform/github.ts packages/cli/src/commands/review/lib/platform/github.test.ts packages/cli/vitest.config.ts
+          node dist/cli.js review publish-assets --help > "$RUNNER_TEMP/repair-result/cli-help.txt"
+          gh repo view AaronZ345/qwen-code --json owner,name,url,parent > "$RUNNER_TEMP/repair-result/gh-repo-view.json"
+          jq -e '.owner.login and .name and .url' "$RUNNER_TEMP/repair-result/gh-repo-view.json"
+      - name: Publish only the verified candidate branch
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/QwenLM/qwen-code/pulls/$PR_NUMBER" --jq .head.sha)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          import subprocess
+          allowed={'packages/cli/src/commands/review/publish-assets.ts','packages/cli/src/commands/review/publish-assets.test.ts','packages/cli/src/commands/review/lib/platform/github.ts','packages/cli/src/commands/review/lib/platform/github.test.ts','packages/cli/vitest.config.ts'}
+          changed=set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert changed and changed <= allowed, changed-allowed
+          PY
+          git diff --check
+          git config user.name 'Yu Zhang'
+          git config user.email '34849476+AaronZ345@users.noreply.github.com'
+          git add packages/cli/src/commands/review/publish-assets.ts packages/cli/src/commands/review/publish-assets.test.ts packages/cli/src/commands/review/lib/platform/github.ts packages/cli/src/commands/review/lib/platform/github.test.ts packages/cli/vitest.config.ts
+          git commit -m 'fix(review): resolve asset targets with valid shared gh arguments'
+          CANDIDATE_SHA=$(git rev-parse HEAD)
+          CANDIDATE_BRANCH="repair/validated-$PR_NUMBER-$GITHUB_RUN_ID"
+          git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
+          jq -n --arg pr "$PR_NUMBER" --arg original "$EXPECTED_HEAD" --arg sha "$CANDIDATE_SHA" --arg branch "$CANDIDATE_BRANCH" '{pr:$pr,original_head:$original,candidate_sha:$sha,candidate_branch:$branch,verified:true,original_pr_updated:false}' > "$RUNNER_TEMP/repair-result/result.json"
+          cat "$RUNNER_TEMP/repair-result/result.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pr-source-snapshots
-          path: ${{ runner.temp }}/pr-snapshots/
+          name: pr-repair-10251
+          path: ${{ runner.temp }}/repair-result/
           retention-days: 1
-          compression-level: 1

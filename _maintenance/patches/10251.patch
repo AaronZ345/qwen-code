@@ -1,0 +1,365 @@
+diff --git a/packages/cli/src/commands/review/lib/platform/github.test.ts b/packages/cli/src/commands/review/lib/platform/github.test.ts
+index f8a77ad..c0b8b61 100644
+--- a/packages/cli/src/commands/review/lib/platform/github.test.ts
++++ b/packages/cli/src/commands/review/lib/platform/github.test.ts
+@@ -12,10 +12,81 @@
+ // process cannot see, so composing a link there could point away from the
+ // host the write actually took.
+ 
+-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+-import { githubReader } from './github.js';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { githubReader, resolveGithubRepo } from './github.js';
+ import { getGhHost, setGhHost } from '../gh.js';
+ 
++const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
++vi.mock('../gh.js', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('../gh.js')>();
++  return { ...actual, gh: ghMock };
++});
++
++describe('resolveGithubRepo', () => {
++  beforeEach(() => {
++    ghMock.mockReset();
++    ghMock.mockReturnValue(JSON.stringify({
++      owner: { login: 'contributor' },
++      name: 'project',
++      url: 'https://github.com/contributor/project',
++      parent: { owner: { login: 'upstream' }, name: 'project' },
++    }));
++  });
++
++  it('keeps default repository resolution on the shared implementation', () => {
++    expect(githubReader.resolveRepo()).toEqual({
++      host: 'github.com',
++      owner: 'upstream',
++      repo: 'project',
++      groupPath: 'upstream/project',
++    });
++    expect(ghMock).toHaveBeenCalledWith(
++      'repo', 'view', '--json', 'owner,name,url,parent',
++    );
++  });
++
++  it('passes an explicit repository positionally and preserves fork folding', () => {
++    expect(resolveGithubRepo('contributor/project')).toEqual({
++      host: 'github.com',
++      owner: 'upstream',
++      repo: 'project',
++      groupPath: 'upstream/project',
++    });
++    expect(ghMock).toHaveBeenCalledWith(
++      'repo', 'view', 'contributor/project', '--json', 'owner,name,url,parent',
++    );
++  });
++
++  it('keeps the repository itself when it is not a fork', () => {
++    ghMock.mockReturnValue(JSON.stringify({
++      owner: { login: 'UPSTREAM' },
++      name: 'Project',
++      url: 'https://ghe.example.com/UPSTREAM/Project',
++      parent: null,
++    }));
++    expect(resolveGithubRepo('UPSTREAM/Project')).toEqual({
++      host: 'ghe.example.com',
++      owner: 'UPSTREAM',
++      repo: 'Project',
++      groupPath: 'upstream/project',
++    });
++  });
++
++  it.each(['', '--repo', '../project', 'not-a-repository'])(
++    'rejects an invalid explicit repository before invoking gh: %s',
++    (repository) => {
++      expect(() => resolveGithubRepo(repository)).toThrow(TypeError);
++      expect(ghMock).not.toHaveBeenCalled();
++    },
++  );
++
++  it('leaves lookup failures visible to the caller', () => {
++    const failure = new Error('HTTP 503');
++    ghMock.mockImplementation(() => { throw failure; });
++    expect(() => resolveGithubRepo('upstream/project')).toThrow(failure);
++  });
++});
++
+ describe('githubReader.composeUrl', () => {
+   let savedEnvHost: string | undefined;
+   let savedRoutedHost: string | undefined;
+diff --git a/packages/cli/src/commands/review/lib/platform/github.ts b/packages/cli/src/commands/review/lib/platform/github.ts
+index a696555..c5c994d 100644
+--- a/packages/cli/src/commands/review/lib/platform/github.ts
++++ b/packages/cli/src/commands/review/lib/platform/github.ts
+@@ -119,37 +119,41 @@ function hostOfRepoUrl(url: string): string {
+     .toLowerCase();
+ }
+ 
++export function resolveGithubRepo(ownerRepo?: string): RepoIdentity {
++  if (ownerRepo !== undefined) checkOwnerRepo(ownerRepo);
++  // `gh repo view` resolves through gh's default-repo. That preference is a
++  // remote literally NAMED `upstream` when one exists — it is NOT an API
++  // fork check: an origin-only fork clone (no `upstream` remote) resolves
++  // to the FORK, where the PR does not live, and a same-numbered PR there
++  // would hand the review the wrong head SHA. Fetch `parent` and prefer it
++  // when the resolved repo is a fork, so a bare PR number always targets
++  // the repo that actually hosts PRs (the measured "guessed fork repo"
++  // incident the deleted prose recorded).
++  const view = ghJson<GhRepoView>(
++    'repo',
++    'view',
++    ...(ownerRepo === undefined ? [] : [ownerRepo]),
++    '--json',
++    'owner,name,url,parent',
++  );
++  const target = view.parent ?? view;
++  return {
++    // A fork and its parent share one host, and `parent` carries no `url` —
++    // so the host comes from the resolved repo's own url, always.
++    host: hostOfRepoUrl(view.url),
++    owner: target.owner.login,
++    repo: target.name,
++    // GitHub repos are always exactly two segments.
++    groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
++  };
++}
++
+ export const githubReader: ReviewPlatformReader = {
+   kind: 'github',
+ 
+   ensureAuthenticated,
+ 
+-  resolveRepo(): RepoIdentity {
+-    // `gh repo view` resolves through gh's default-repo. That preference is a
+-    // remote literally NAMED `upstream` when one exists — it is NOT an API
+-    // fork check: an origin-only fork clone (no `upstream` remote) resolves
+-    // to the FORK, where the PR does not live, and a same-numbered PR there
+-    // would hand the review the wrong head SHA. Fetch `parent` and prefer it
+-    // when the resolved repo is a fork, so a bare PR number always targets
+-    // the repo that actually hosts PRs (the measured "guessed fork repo"
+-    // incident the deleted prose recorded).
+-    const view = ghJson<GhRepoView>(
+-      'repo',
+-      'view',
+-      '--json',
+-      'owner,name,url,parent',
+-    );
+-    const target = view.parent ?? view;
+-    return {
+-      // A fork and its parent share one host, and `parent` carries no `url` —
+-      // so the host comes from the resolved repo's own url, always.
+-      host: hostOfRepoUrl(view.url),
+-      owner: target.owner.login,
+-      repo: target.name,
+-      // GitHub repos are always exactly two segments.
+-      groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
+-    };
+-  },
++  resolveRepo: resolveGithubRepo,
+ 
+   getPrMeta(prNumber: number, ownerRepo: string): PrMeta {
+     checkOwnerRepo(ownerRepo);
+diff --git a/packages/cli/src/commands/review/publish-assets.test.ts b/packages/cli/src/commands/review/publish-assets.test.ts
+index 5d1b3d4..1ed3ccc 100644
+--- a/packages/cli/src/commands/review/publish-assets.test.ts
++++ b/packages/cli/src/commands/review/publish-assets.test.ts
+@@ -311,6 +311,7 @@ describe('publish-assets', () => {
+     ghMock.mockImplementation((...args: string[]) => {
+       if (args[0] === 'repo' && args[1] === 'view') {
+         return JSON.stringify({
++          url: 'https://github.com/AaronZ345/qwen-code',
+           owner: { login: 'AaronZ345' },
+           name: 'qwen-code',
+           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+@@ -322,6 +323,12 @@ describe('publish-assets', () => {
+ 
+     run({ files: [pngFile('evidence.png')] });
+ 
++    expect(ghMock).toHaveBeenCalledWith(
++      'repo',
++      'view',
++      '--json',
++      'owner,name,url,parent',
++    );
+     expect(process.exitCode).toBeUndefined();
+     const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+       '\n',
+@@ -345,8 +352,8 @@ describe('publish-assets', () => {
+   });
+ 
+   it('folds --reviewed-repo to its upstream before the self-target check', () => {
+-    // The flag names the probe TARGET, not the answer: `repo view --repo
+-    // <fork>` still resolves the fork, and `parent` folds it to the upstream
++    // The flag names the probe TARGET, not the answer: `repo view <fork>`
++    // resolves the fork, and `parent` folds it to the upstream
+     // that hosts the PR. Passing the fork must warn exactly as the CWD-probe
+     // branch does — otherwise the same (review-target, assets-repo) pair warns
+     // or stays silent purely on whether the caller passed the flag. Reverting
+@@ -355,11 +362,8 @@ describe('publish-assets', () => {
+     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'QwenLM/qwen-code';
+     ghMock.mockImplementation((...args: string[]) => {
+       if (args[0] === 'repo' && args[1] === 'view') {
+-        // The probe carries `--repo AaronZ345/qwen-code`; gh resolves the fork
+-        // and reports its upstream in `parent`.
+-        expect(args).toContain('--repo');
+-        expect(args).toContain('AaronZ345/qwen-code');
+         return JSON.stringify({
++          url: 'https://github.com/AaronZ345/qwen-code',
+           owner: { login: 'AaronZ345' },
+           name: 'qwen-code',
+           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+@@ -374,6 +378,13 @@ describe('publish-assets', () => {
+       reviewedRepo: 'AaronZ345/qwen-code',
+     });
+ 
++    expect(ghMock).toHaveBeenCalledWith(
++      'repo',
++      'view',
++      'AaronZ345/qwen-code',
++      '--json',
++      'owner,name,url,parent',
++    );
+     expect(process.exitCode).toBeUndefined();
+     const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+       '\n',
+@@ -391,6 +402,7 @@ describe('publish-assets', () => {
+     ghMock.mockImplementation((...args: string[]) => {
+       if (args[0] === 'repo' && args[1] === 'view') {
+         return JSON.stringify({
++          url: 'https://github.com/QwenLM/qwen-code',
+           owner: { login: 'QwenLM' },
+           name: 'qwen-code',
+           parent: null,
+@@ -418,6 +430,7 @@ describe('publish-assets', () => {
+     ghMock.mockImplementation((...args: string[]) => {
+       if (args[0] === 'repo' && args[1] === 'view') {
+         return JSON.stringify({
++          url: 'https://github.com/qwenlm/qwen-code',
+           owner: { login: 'qwenlm' },
+           name: 'qwen-code',
+           parent: null,
+@@ -447,6 +460,7 @@ describe('publish-assets', () => {
+     ghMock.mockImplementation((...args: string[]) => {
+       if (args[0] === 'repo' && args[1] === 'view') {
+         return JSON.stringify({
++          url: 'https://github.com/AaronZ345/qwen-code',
+           owner: { login: 'AaronZ345' },
+           name: 'qwen-code',
+           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+@@ -467,6 +481,36 @@ describe('publish-assets', () => {
+     );
+   });
+ 
++  it.each([
++    ['network failure', undefined],
++    ['network failure', 'QwenLM/qwen-code'],
++    ['invalid JSON', undefined],
++    ['invalid JSON', 'QwenLM/qwen-code'],
++    ['incomplete metadata', undefined],
++    ['incomplete metadata', 'QwenLM/qwen-code'],
++  ])('reports a skipped self-target check after %s (%s)', (failure, reviewedRepo) => {
++    ghMock.mockImplementation((...args: string[]) => {
++      if (args[0] === 'repo' && args[1] === 'view') {
++        if (failure === 'network failure') throw new Error('HTTP 503');
++        return failure === 'invalid JSON' ? '{' : '{}';
++      }
++      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
++    });
++    ghWithInputMock.mockImplementation(() => '{}');
++
++    run({ files: [pngFile('evidence.png')], reviewedRepo });
++
++    expect(process.exitCode).toBeUndefined();
++    expect(stderrSpy).toHaveBeenCalledWith(
++      'publish-assets: warning — could not determine the reviewed repository; ' +
++        'the self-target check was skipped. Publication is still authorised.',
++    );
++    expect(stdoutSpy).toHaveBeenCalledWith(
++      JSON.stringify({ published: true, count: 1 }),
++    );
++    expect(ghWithInputMock).toHaveBeenCalled();
++  });
++
+   it('creates the branch when missing, from the default branch head', () => {
+     // First ref lookup throws (missing branch); the creation path then asks
+     // for the default branch and its head; the post-upload head read follows.
+diff --git a/packages/cli/src/commands/review/publish-assets.ts b/packages/cli/src/commands/review/publish-assets.ts
+index 3fad527..ac1c238 100644
+--- a/packages/cli/src/commands/review/publish-assets.ts
++++ b/packages/cli/src/commands/review/publish-assets.ts
+@@ -40,6 +40,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+ import { gh, ghWithInputRetried, resolveGhHost, setGhHost } from './lib/gh.js';
+ import { reviewWriteAuthorization } from './lib/authorization.js';
+ import { operatorReviewSettings } from './lib/review-settings.js';
++import { resolveGithubRepo } from './lib/platform/github.js';
+ import {
+   ASSET_HEADER_BYTES,
+   assetsBranch,
+@@ -67,42 +68,17 @@ interface PublishAssetsArgs {
+   defaultComment?: boolean;
+ }
+ 
+-/** Shape of `gh repo view --json owner,name,parent` (fields we read). */
+-interface GhRepoView {
+-  owner?: { login?: string };
+-  name?: string;
+-  // Present only when the resolved repo is a fork; gh emits no `url` here.
+-  parent?: {
+-    owner?: { login?: string };
+-    name?: string;
+-  };
+-}
+-
+-// The repository this review is OF, folded to its upstream when the resolved
+-// repo is a fork. `gh repo view` resolves through gh's default-repo, which for
+-// an origin-only fork clone is the FORK — where the PR does not live; prefer
+-// `parent` so the self-target check compares against the repo that actually
+-// hosts the PR (the measured "guessed fork repo" incident recorded in
+-// lib/platform/github.ts). `--reviewed-repo` names the probe TARGET, not the
+-// answer, so both branches fold identically — otherwise the same
+-// (review-target, assets-repo) pair warns or stays silent purely on whether
+-// the caller passed the flag.
+ function resolveReviewedRepoForSelfTargetWarning(
+   args: PublishAssetsArgs,
+ ): string | undefined {
+   try {
+-    const viewArgs = args.reviewedRepo
+-      ? ['repo', 'view', '--repo', args.reviewedRepo]
+-      : ['repo', 'view'];
+-    const view = JSON.parse(
+-      gh(...viewArgs, '--json', 'owner,name,parent'),
+-    ) as GhRepoView;
+-    const target = view.parent ?? view;
+-    const owner = target.owner?.login;
+-    const name = target.name;
+-    return owner && name ? `${owner}/${name}` : undefined;
++    return resolveGithubRepo(args.reviewedRepo).groupPath;
+   } catch {
+-    return undefined; // a warning must never fail the publish
++    writeStderrLine(
++      'publish-assets: warning — could not determine the reviewed repository; ' +
++        'the self-target check was skipped. Publication is still authorised.',
++    );
++    return undefined;
+   }
+ }
+ 
+diff --git a/packages/cli/vitest.config.ts b/packages/cli/vitest.config.ts
+index ebaea46..a948720 100644
+--- a/packages/cli/vitest.config.ts
++++ b/packages/cli/vitest.config.ts
+@@ -238,15 +238,6 @@ export default defineConfig({
+     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+       ? '25%'
+-      : process.env.CI
+-        ? 2
+-        : undefined,
+-    poolOptions: process.env.CI
+-      ? {
+-          threads: {
+-            maxThreads: 2,
+-          },
+-        }
+       : undefined,
+     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
+     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
