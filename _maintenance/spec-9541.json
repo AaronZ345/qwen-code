@@ -1,0 +1,33 @@
+{
+  "9541": {
+    "package": "packages/cli",
+    "tests": ["src/ui/opentui/session-compaction.test.ts", "src/ui/components/messages/CompressionMessage.test.tsx", "src/ui/commands/compressCommand.test.ts"],
+    "test_suites": [
+      {"package": "packages/cli", "tests": ["src/ui/opentui/session-compaction.test.ts", "src/ui/components/messages/CompressionMessage.test.tsx", "src/ui/commands/compressCommand.test.ts", "src/i18n/index.test.ts", "src/i18n/mustTranslateKeys.test.ts"]},
+      {"package": "packages/core", "tests": ["src/services/chatCompressionService.test.ts", "src/utils/compactionInputSlimming.test.ts", "src/utils/microcompact.test.ts", "src/core/llm-chat.test.ts", "src/core/turn.test.ts"]}
+    ],
+    "red_file": "packages/cli/src/ui/opentui/session-compaction.test.ts",
+    "red_pattern": "reports input admission failure",
+    "red_evidence": "not enough room",
+    "typecheck": "packages/cli",
+    "build_workspace": "packages/cli",
+    "message": "fix(compression): render admission failures and preserve endpoint-aware budgets",
+    "files": [
+      "packages/core/src/services/chatCompressionService.ts",
+      "packages/cli/src/ui/utils/compression-text.ts",
+      "packages/cli/src/ui/opentui/session-compaction.tsx",
+      "packages/cli/src/ui/opentui/session-compaction.test.ts",
+      "packages/cli/src/ui/components/messages/CompressionMessage.tsx",
+      "packages/cli/src/ui/components/messages/CompressionMessage.test.tsx",
+      "packages/cli/src/i18n/locales/en.js",
+      "packages/cli/src/i18n/locales/zh.js",
+      "packages/cli/src/i18n/locales/zh-TW.js",
+      "packages/cli/src/i18n/locales/ja.js",
+      "packages/cli/src/i18n/locales/ru.js",
+      "packages/cli/src/i18n/locales/pt.js",
+      "packages/cli/src/i18n/locales/fr.js",
+      "packages/cli/src/i18n/locales/de.js",
+      "packages/cli/src/i18n/locales/ca.js"
+    ]
+  }
+}
