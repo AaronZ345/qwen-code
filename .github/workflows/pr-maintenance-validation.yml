@@ -12,17 +12,33 @@ permissions:
 
 jobs:
   repair:
-    name: Verify PR 10279
+    name: Verify PR ${{ matrix.pr }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: '10280'
+            head: d904473895e59e4e52559c77d92f03cd04c498e6
+            branch: fix/10170-esc-cancel-stop
+            patch: 4acaeda1f1822ef135443a87d4c6c08d00167951
+          - pr: '10279'
+            head: adce346cad83ac768a1cbafded225b1d4ce98a70
+            branch: fix/10276-dws-error-detail
+            patch: 4dfc29efa05465a23816b765d7c9ed4ecd2329f6
+          - pr: '9921'
+            head: 8d537a5bb68c3e48fb4ceee9f848a8f195cc583a
+            branch: fix-ask-question-cancel-reason
+            patch: 51a1d5fa0e1a8cadab387b3705af96951f9bfb54
     env:
       GH_TOKEN: ${{ github.token }}
       NO_COLOR: '1'
       TERM: dumb
-      EXPECTED_HEAD: adce346cad83ac768a1cbafded225b1d4ce98a70
-      HEAD_BRANCH: fix/10276-dws-error-detail
-      PR_NUMBER: '10279'
-      PATCH_BLOB: 4dfc29efa05465a23816b765d7c9ed4ecd2329f6
+      EXPECTED_HEAD: ${{ matrix.head }}
+      HEAD_BRANCH: ${{ matrix.branch }}
+      PR_NUMBER: ${{ matrix.pr }}
+      PATCH_BLOB: ${{ matrix.patch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,13 +49,23 @@ jobs:
           node-version: 22
       - name: Verify and check out the exact current PR head
         run: python3 control/_maintenance/verify_current.py prepare
+      - name: Remove only the named unrelated PR hunks
+        run: python3 control/_maintenance/complete.py rollback
       - name: Install pinned dependencies and build workspaces
         run: python3 control/_maintenance/verify.py install
       - name: Reproduce the reported defect before the fix
         run: python3 control/_maintenance/verify.py red
       - name: Apply and format the implementation repair
-        run: python3 control/_maintenance/verify.py fix
-      - name: Build the affected package
+        run: python3 control/_maintenance/complete.py fix
+      - name: Remove the obsolete DWS helper import
+        if: matrix.pr == '10279'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C candidate apply --check "$GITHUB_WORKSPACE/control/_maintenance/patches/10279-unused-import.patch"
+          git -C candidate apply "$GITHUB_WORKSPACE/control/_maintenance/patches/10279-unused-import.patch"
+          git -C candidate diff --binary > "$RUNNER_TEMP/repair-result/fix.patch"
+      - name: Build and type-check the affected package
         run: python3 control/_maintenance/verify.py build
       - name: Run regression suites and lint
         run: python3 control/_maintenance/verify.py green
@@ -48,6 +74,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pr-repair-10279
+          name: pr-repair-${{ matrix.pr }}
           path: ${{ runner.temp }}/repair-result/
           retention-days: 1
