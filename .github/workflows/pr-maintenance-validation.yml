@@ -43,8 +43,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Merge current upstream into an isolated candidate
-        run: python3 control/_maintenance/verify.py prepare
+      - name: Verify and check out the exact current PR head
+        run: python3 control/_maintenance/verify_current.py prepare
       - name: Install pinned dependencies and build workspaces
         run: python3 control/_maintenance/verify.py install
       - name: Reproduce the reported defect before the fix
@@ -55,8 +55,8 @@ jobs:
         run: python3 control/_maintenance/verify.py build
       - name: Run regression suites and lint
         run: python3 control/_maintenance/verify.py green
-      - name: Publish the verified candidate without changing the original PR
-        run: python3 control/_maintenance/verify.py publish
+      - name: Export verified files and publish the isolated candidate
+        run: python3 control/_maintenance/verify_current.py publish
       - uses: actions/upload-artifact@v4
         if: always()
         with:
