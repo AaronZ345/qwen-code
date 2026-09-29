@@ -8,4 +8,5 @@ diff --git a/packages/channels/dws/src/dws-client.ts b/packages/channels/dws/src
 -import { sanitizeLogText, truncateCodePoints } from '@qwen-code/channel-base';
 +import { sanitizeLogText } from '@qwen-code/channel-base';
  import { dwsProcessEnvironment } from './dws-environment.js';
- import type {
+ import {
+   startDwsEventProcess,
