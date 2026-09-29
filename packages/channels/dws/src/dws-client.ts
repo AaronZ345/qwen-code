@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, type ExecFileException } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
-import { sanitizeLogText, truncateCodePoints } from '@qwen-code/channel-base';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
   startDwsEventProcess,
@@ -18,8 +18,7 @@ const DWS_PROCESS_TIMEOUT_MS = 45_000;
 const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const DWS_ERROR_OUTPUT_MAX_CHARS = 256;
-const DWS_ERROR_OUTPUT_WINDOW_CHARS = DWS_ERROR_OUTPUT_MAX_CHARS * 2;
+const DWS_ERROR_MESSAGE_MAX_CHARS = 200;
 const MAX_MESSAGE_PAGES = 100;
 const MAX_TODO_PAGES = 50;
 const TODO_PAGE_SIZE = 20;
@@ -199,33 +198,48 @@ export function classifyDwsCommandFailure(code: unknown): DwsCommandOutcome {
 }
 
 function dwsCommandFailureMessage(
-  code: unknown,
-  stdout: unknown,
-  stderr: unknown,
+  error: ExecFileException,
+  args: string[],
+  stdout: string,
+  stderr: string,
 ): string {
-  const base = `DWS command failed${code === undefined || code === null ? '' : ` (${String(code)})`}`;
+  const words = args.slice(args[0] === '--profile' ? 2 : 0);
+  const firstOption = words.findIndex((word) => word.startsWith('--'));
+  const command = sanitizeLogText(
+    words.slice(0, firstOption < 0 ? words.length : firstOption).join(' '),
+    40,
+  );
+  const status =
+    error.code ?? error.signal ?? (error.killed ? 'terminated' : undefined);
+  const base = `DWS ${command || 'command'} failed${status == null ? '' : ` (${String(status)})`}`;
+  const prefix = `${base}: `;
+  const budget = DWS_ERROR_MESSAGE_MAX_CHARS - Array.from(prefix).length;
+  // Interrupted --format=json output can be a document or conversation body,
+  // not an error. Only ordinary non-zero exits can supply a stdout fallback.
+  const stdoutIsDiagnostic =
+    typeof error.code === 'number' &&
+    error.code !== 0 &&
+    !error.killed &&
+    !error.signal &&
+    !/^\s*[[{]/u.test(stdout);
   const details =
-    dwsCommandFailureDetails(stderr) || dwsCommandFailureDetails(stdout);
-  return details ? `${base}: ${details}` : `${base}.`;
+    dwsCommandFailureDetails(stderr, budget) ||
+    (stdoutIsDiagnostic ? dwsCommandFailureDetails(stdout, budget) : '');
+  return details ? `${prefix}${details}` : `${base}.`;
 }
 
-function dwsCommandFailureDetails(output: unknown): string {
-  const window = String(output ?? '').slice(-DWS_ERROR_OUTPUT_WINDOW_CHARS);
-  if (!window.trim()) return '';
-  const details = truncateCodePointsFromEnd(
-    sanitizeLogText(
-      stripVTControlCharacters(window),
-      DWS_ERROR_OUTPUT_WINDOW_CHARS,
-    ),
-    DWS_ERROR_OUTPUT_MAX_CHARS,
-  ).trim();
-  return details;
-}
-
-function truncateCodePointsFromEnd(str: string, max: number): string {
-  const truncated = truncateCodePoints(str, max);
-  if (truncated === str) return str;
-  return Array.from(str).slice(-max).join('');
+function dwsCommandFailureDetails(output: string, max: number): string {
+  // Strip complete escape sequences before taking a window; cutting the raw
+  // stream can expose an OSC payload or split a CSI sequence.
+  const clean = stripVTControlCharacters(output)
+    .replace(/\p{Surrogate}/gu, '\uFFFD')
+    .replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ')
+    .trim();
+  const window = clean.slice(-max * 2);
+  const points = Array.from(sanitizeLogText(window, window.length).trim());
+  return clean.length > window.length || points.length > max
+    ? `…${points.slice(-(max - 1)).join('')}`
+    : points.join('');
 }
 
 function runDwsProcess(
@@ -253,7 +267,12 @@ function runDwsProcess(
           const outcome = classifyDwsCommandFailure(code);
           reject(
             new DwsCommandError(
-              dwsCommandFailureMessage(code, stdout, stderr),
+              dwsCommandFailureMessage(
+                error,
+                args,
+                String(stdout),
+                String(stderr),
+              ),
               outcome,
             ),
           );
