@@ -1,0 +1,13 @@
+{
+  "10279": {
+    "package": "packages/channels/dws",
+    "tests": ["src/dws-client-process.test.ts", "src/dws-client.test.ts", "src/dws-channel.test.ts"],
+    "red_file": "packages/channels/dws/src/dws-client-process.test.ts",
+    "red_pattern": "strips a long OSC payload",
+    "red_evidence": "fatal: denied",
+    "typecheck": null,
+    "build_workspace": "packages/channels/dws",
+    "message": "fix(dws): keep bounded diagnostics without leaking interrupted output",
+    "files": ["packages/channels/dws/src/dws-client.ts", "packages/channels/dws/src/dws-client-process.test.ts", "packages/cli/vitest.config.ts"]
+  }
+}
