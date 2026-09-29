@@ -1,0 +1,309 @@
+diff --git a/packages/channels/dws/src/dws-client-process.test.ts b/packages/channels/dws/src/dws-client-process.test.ts
+index c435f4c..b5c807b 100644
+--- a/packages/channels/dws/src/dws-client-process.test.ts
++++ b/packages/channels/dws/src/dws-client-process.test.ts
+@@ -15,10 +15,14 @@ describe('DWS command process', () => {
+     code = 1,
+     stdout = '',
+     stderr = '',
++    signal,
++    killed = false,
+   }: {
+     code?: unknown;
+     stdout?: string;
+     stderr?: string;
++    signal?: NodeJS.Signals;
++    killed?: boolean;
+   }) {
+     vi.mocked(execFile).mockImplementation(((
+       _file,
+@@ -27,7 +31,7 @@ describe('DWS command process', () => {
+       callback,
+     ) => {
+       queueMicrotask(() => {
+-        callback(Object.assign(new Error('exit'), { code }), stdout, stderr);
++        callback(Object.assign(new Error('exit'), { code, signal, killed }), stdout, stderr);
+       });
+       return {
+         exitCode: typeof code === 'number' ? code : null,
+@@ -53,7 +57,7 @@ describe('DWS command process', () => {
+       kill: vi.fn((signal: NodeJS.Signals) => {
+         if (signal === 'SIGKILL') {
+           child.exitCode = 1;
+-          callback(Object.assign(new Error('killed'), { code: null }), '', '');
++          callback(Object.assign(new Error('killed'), { code: null, signal: 'SIGKILL', killed: true }), '', '');
+         }
+         return true;
+       }),
+@@ -76,7 +80,8 @@ describe('DWS command process', () => {
+     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+     const error = await result;
+     expect(error).toBeInstanceOf(DwsCommandError);
+-    expect((error as Error).message).toBe('DWS command failed.');
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++    expect((error as Error).message).toBe('DWS version failed (SIGKILL).');
+   });
+ 
+   it('includes sanitized stderr details when a DWS command exits non-zero', async () => {
+@@ -89,8 +94,9 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
++    expect((error as DwsCommandError).outcome).toBe('unknown');
+     expect((error as Error).message).toContain(
+-      'DWS command failed (1): HTTP 400\\n{"errorCode":"InvalidArgs"}',
++      'DWS version failed (1): HTTP 400 {"errorCode":"InvalidArgs"}',
+     );
+     expect((error as Error).message).not.toContain('[31m');
+   });
+@@ -103,8 +109,9 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
++    expect((error as DwsCommandError).outcome).toBe('unknown');
+     expect((error as Error).message).toContain(
+-      'DWS command failed (1): detail on stdout',
++      'DWS version failed (1): detail on stdout',
+     );
+   });
+ 
+@@ -119,7 +126,8 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
+-    expect((error as Error).message).toBe('DWS command failed (1): real error');
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++    expect((error as Error).message).toBe('DWS version failed (1): real error');
+   });
+ 
+   it('falls back to stdout when stderr sanitizes to empty', async () => {
+@@ -133,8 +141,9 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
++    expect((error as DwsCommandError).outcome).toBe('unknown');
+     expect((error as Error).message).toContain(
+-      'DWS command failed (1): error: quota exceeded',
++      'DWS version failed (1): error: quota exceeded',
+     );
+   });
+ 
+@@ -146,7 +155,8 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
+-    expect((error as Error).message).toBe('DWS command failed (1).');
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++    expect((error as Error).message).toBe('DWS version failed (1).');
+   });
+ 
+   it('strips OSC terminal control sequences from failure details', async () => {
+@@ -159,6 +169,7 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
++    expect((error as DwsCommandError).outcome).toBe('unknown');
+     expect((error as Error).message).toContain('boom');
+     expect((error as Error).message).not.toContain(']0;evil');
+   });
+@@ -170,10 +181,11 @@ describe('DWS command process', () => {
+       .assertCompatible()
+       .catch((caught: unknown) => caught);
+ 
+-    const prefix = 'DWS command failed (1): ';
++    const prefix = 'DWS version failed (1): ';
+     expect(error).toBeInstanceOf(DwsCommandError);
+-    expect((error as Error).message).toBe(`${prefix}${'x'.repeat(252)}tail`);
+-    expect((error as Error).message).not.toContain('x'.repeat(253));
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++    expect((error as Error).message).toBe(`${prefix}…${'x'.repeat(200 - prefix.length - 5)}tail`);
++    expect(Array.from((error as Error).message)).toHaveLength(200);
+   });
+ 
+   it('keeps later diagnostics from long command output', async () => {
+@@ -184,6 +196,65 @@ describe('DWS command process', () => {
+       .catch((caught: unknown) => caught);
+ 
+     expect(error).toBeInstanceOf(DwsCommandError);
++    expect((error as DwsCommandError).outcome).toBe('unknown');
+     expect((error as Error).message).toContain('fatal: denied');
+   });
++
++  it('strips a long OSC payload before selecting the diagnostic tail', async () => {
++    mockFailedDwsCommand({ stderr: `fatal: denied\u001b]0;${'secret-title'.repeat(100)}\u0007` });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    expect((error as Error).message).toBe('DWS version failed (1): fatal: denied');
++    expect((error as Error).message).not.toContain('secret-title');
++  });
++
++  it('preserves a complete Unicode tail within the downstream 200-character cap', async () => {
++    mockFailedDwsCommand({ stderr: `${'🎉'.repeat(600)} fatal: 拒绝` });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    const message = (error as Error).message;
++    expect(Array.from(message)).toHaveLength(200);
++    expect(message).toContain('…');
++    expect(message.endsWith(' fatal: 拒绝')).toBe(true);
++    expect(message).not.toMatch(/\p{Surrogate}/u);
++  });
++
++  it('does not spend the diagnostic budget on control-character padding', async () => {
++    mockFailedDwsCommand({ stderr: `fatal: denied${'\n\r\t\u0000'.repeat(1000)}` });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    expect((error as Error).message).toBe('DWS version failed (1): fatal: denied');
++  });
++
++  it.each([
++    { code: null, signal: 'SIGTERM' as const, killed: true },
++    { code: null, signal: 'SIGKILL' as const, killed: true },
++    { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
++    { code: 'ABORT_ERR' },
++  ])('does not log interrupted stdout for $code/$signal', async (failure) => {
++    mockFailedDwsCommand({ ...failure, stdout: 'private document body' });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    expect((error as Error).message).not.toContain('private document body');
++    expect((error as Error).message).toContain(String(failure.code ?? failure.signal));
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++  });
++
++  it('does not copy a structured stdout payload into a failure log', async () => {
++    mockFailedDwsCommand({ stdout: '{"document":"private document body"}' });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    expect((error as Error).message).toBe('DWS version failed (1).');
++  });
++
++  it('identifies the command without including profile names or message contents', async () => {
++    mockFailedDwsCommand({ stderr: 'permission denied' });
++    const client = new DwsClient({ executable: '/opt/dws', profile: 'private-profile' });
++    const error = await client.sendImMessage({ kind: 'group', conversationId: 'private-room' }, 'private message', 'private-key').catch((caught: unknown) => caught);
++    expect((error as Error).message).toBe('DWS chat message send failed (1): permission denied');
++    expect((error as Error).message).not.toContain('private');
++    expect((error as DwsCommandError).outcome).toBe('unknown');
++  });
++
++  it('preserves not_sent for spawn failures', async () => {
++    mockFailedDwsCommand({ code: 'ENOENT' });
++    const error = await new DwsClient({ executable: '/opt/dws' }).assertCompatible().catch((caught: unknown) => caught);
++    expect((error as DwsCommandError).outcome).toBe('not_sent');
++    expect((error as Error).message).toContain('ENOENT');
++  });
+ });
+diff --git a/packages/channels/dws/src/dws-client.ts b/packages/channels/dws/src/dws-client.ts
+index 826a4c1..ca7641f 100644
+--- a/packages/channels/dws/src/dws-client.ts
++++ b/packages/channels/dws/src/dws-client.ts
+@@ -4,7 +4,7 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+-import { execFile } from 'node:child_process';
++import { execFile, type ExecFileException } from 'node:child_process';
+ import { stripVTControlCharacters } from 'node:util';
+ import { sanitizeLogText, truncateCodePoints } from '@qwen-code/channel-base';
+ import { dwsProcessEnvironment } from './dws-environment.js';
+@@ -18,8 +18,7 @@ const DWS_PROCESS_TIMEOUT_MS = 45_000;
+ const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
+ const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
+ const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+-const DWS_ERROR_OUTPUT_MAX_CHARS = 256;
+-const DWS_ERROR_OUTPUT_WINDOW_CHARS = DWS_ERROR_OUTPUT_MAX_CHARS * 2;
++const DWS_ERROR_MESSAGE_MAX_CHARS = 200;
+ const MAX_MESSAGE_PAGES = 100;
+ const MAX_TODO_PAGES = 50;
+ const TODO_PAGE_SIZE = 20;
+@@ -199,33 +198,44 @@ export function classifyDwsCommandFailure(code: unknown): DwsCommandOutcome {
+ }
+ 
+ function dwsCommandFailureMessage(
+-  code: unknown,
+-  stdout: unknown,
+-  stderr: unknown,
++  error: ExecFileException,
++  args: string[],
++  stdout: string,
++  stderr: string,
+ ): string {
+-  const base = `DWS command failed${code === undefined || code === null ? '' : ` (${String(code)})`}`;
++  const words = args.slice(args[0] === '--profile' ? 2 : 0);
++  const firstOption = words.findIndex((word) => word.startsWith('--'));
++  const command = sanitizeLogText(
++    words.slice(0, firstOption < 0 ? words.length : firstOption).join(' '),
++    40,
++  );
++  const status = error.code ?? error.signal ?? (error.killed ? 'terminated' : undefined);
++  const base = `DWS ${command || 'command'} failed${status == null ? '' : ` (${String(status)})`}`;
++  const prefix = `${base}: `;
++  const budget = DWS_ERROR_MESSAGE_MAX_CHARS - Array.from(prefix).length;
++  // Interrupted --format=json output can be a document or conversation body,
++  // not an error. Only ordinary non-zero exits can supply a stdout fallback.
++  const stdoutIsDiagnostic =
++    typeof error.code === 'number' && error.code !== 0 && !error.killed && !error.signal &&
++    !/^[\s]*[\[{]/u.test(stdout);
+   const details =
+-    dwsCommandFailureDetails(stderr) || dwsCommandFailureDetails(stdout);
+-  return details ? `${base}: ${details}` : `${base}.`;
+-}
+-
+-function dwsCommandFailureDetails(output: unknown): string {
+-  const window = String(output ?? '').slice(-DWS_ERROR_OUTPUT_WINDOW_CHARS);
+-  if (!window.trim()) return '';
+-  const details = truncateCodePointsFromEnd(
+-    sanitizeLogText(
+-      stripVTControlCharacters(window),
+-      DWS_ERROR_OUTPUT_WINDOW_CHARS,
+-    ),
+-    DWS_ERROR_OUTPUT_MAX_CHARS,
+-  ).trim();
+-  return details;
++    dwsCommandFailureDetails(stderr, budget) ||
++    (stdoutIsDiagnostic ? dwsCommandFailureDetails(stdout, budget) : '');
++  return details ? `${prefix}${details}` : `${base}.`;
+ }
+ 
+-function truncateCodePointsFromEnd(str: string, max: number): string {
+-  const truncated = truncateCodePoints(str, max);
+-  if (truncated === str) return str;
+-  return Array.from(str).slice(-max).join('');
++function dwsCommandFailureDetails(output: string, max: number): string {
++  // Strip complete escape sequences before taking a window; cutting the raw
++  // stream can expose an OSC payload or split a CSI sequence.
++  const clean = stripVTControlCharacters(output)
++    .replace(/\p{Surrogate}/gu, '\uFFFD')
++    .replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ')
++    .trim();
++  const window = clean.slice(-max * 2);
++  const points = Array.from(sanitizeLogText(window, window.length).trim());
++  return clean.length > window.length || points.length > max
++    ? `…${points.slice(-(max - 1)).join('')}`
++    : points.join('');
+ }
+ 
+ function runDwsProcess(
+@@ -253,7 +263,7 @@ function runDwsProcess(
+           const outcome = classifyDwsCommandFailure(code);
+           reject(
+             new DwsCommandError(
+-              dwsCommandFailureMessage(code, stdout, stderr),
++              dwsCommandFailureMessage(error, args, String(stdout), String(stderr)),
+               outcome,
+             ),
+           );
+diff --git a/packages/cli/vitest.config.ts b/packages/cli/vitest.config.ts
+index ebaea46..a948720 100644
+--- a/packages/cli/vitest.config.ts
++++ b/packages/cli/vitest.config.ts
+@@ -238,15 +238,6 @@ export default defineConfig({
+     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+       ? '25%'
+-      : process.env.CI
+-        ? 2
+-        : undefined,
+-    poolOptions: process.env.CI
+-      ? {
+-          threads: {
+-            maxThreads: 2,
+-          },
+-        }
+       : undefined,
+     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
+     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
