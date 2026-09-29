@@ -17,16 +17,11 @@
 import type { TeammateApprovalRequestEvent } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
 import type { WorkflowApproval } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import type { WaitingToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
-import type {
-  ToolExecuteConfirmationDetails,
-  ToolMcpConfirmationDetails,
-  ToolConfirmationPayload,
-} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { AUTO_REJECT_APPROVAL_PAYLOAD } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import { InputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -449,7 +444,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
-        AUTO_REJECT_APPROVAL_PAYLOAD,
+        { cancelMessage: ABORTED_TURN_CANCEL_MESSAGE },
       );
       return;
     }
@@ -459,7 +454,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
-        AUTO_REJECT_APPROVAL_PAYLOAD,
+        { cancelMessage: this.getInteractionUnavailableMessage(approval.name) },
       );
       return;
     }
@@ -508,7 +503,11 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
-        AUTO_REJECT_APPROVAL_PAYLOAD,
+        {
+          cancelMessage: signal.aborted
+            ? ABORTED_TURN_CANCEL_MESSAGE
+            : `The host workflow approval request failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
       );
     }
   }
@@ -534,11 +533,7 @@ export class PermissionController extends BaseController {
       if (signal.aborted) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
-          requiresUserInteraction
-            ? {
-                cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
-              }
-            : undefined,
+          { cancelMessage: ABORTED_TURN_CANCEL_MESSAGE },
         );
         return;
       }
@@ -658,42 +653,16 @@ export class PermissionController extends BaseController {
         error,
       );
 
-      // Extract error message
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-
-      // On error, pass error message as cancel message
-      // Only pass payload for exec and mcp types that support it
-      const confirmationType = toolCall.confirmationDetails.type;
-      if (signal.aborted && requiresUserInteraction) {
-        await toolCall.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.Cancel,
-          {
-            cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
-          },
-        );
-      } else if (requiresUserInteraction) {
-        await toolCall.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.Cancel,
-          {
-            cancelMessage: interactionUnavailableMessage,
-          },
-        );
-      } else if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
-        const execOrMcpDetails = toolCall.confirmationDetails as
-          | ToolExecuteConfirmationDetails
-          | ToolMcpConfirmationDetails;
-        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
-          cancelMessage: `Error: ${errorMessage}`,
-        });
-      } else {
-        await toolCall.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.Cancel,
-          {
-            cancelMessage: `Error: ${errorMessage}`,
-          },
-        );
-      }
+      await toolCall.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.Cancel,
+        {
+          cancelMessage: signal.aborted
+            ? ABORTED_TURN_CANCEL_MESSAGE
+            : `The host approval request for "${toolCall.request.name}" failed: ${errorMessage}`,
+        },
+      );
     } finally {
       this.pendingOutgoingRequests.delete(toolCall.request.callId);
     }

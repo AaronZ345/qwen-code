@@ -19,7 +19,6 @@ import type {
 
 import {
   AgentEventType,
-  AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -336,14 +335,16 @@ export class SubAgentTracker {
         // Fail closed: if the client cannot answer a nested permission
         // request, stop the parent turn instead of letting later tools run
         // without the required user input.
+        const cancelMessage = abortSignal.aborted
+          ? 'The turn was cancelled before the approval could be answered.'
+          : `The host approval request for "${event.name}" failed: ${error instanceof Error ? error.message : String(error)}`;
         if (!abortSignal.aborted) {
           this.onPermissionCancel?.();
         }
         try {
-          await event.respond(
-            ToolConfirmationOutcome.Cancel,
-            AUTO_REJECT_APPROVAL_PAYLOAD,
-          );
+          await event.respond(ToolConfirmationOutcome.Cancel, {
+            cancelMessage,
+          });
         } catch (respondError) {
           debugLogger.error(
             `Failed to cancel subagent tool ${event.name} after permission request failure:`,

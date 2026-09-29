@@ -7,7 +7,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ApprovalMode,
-  AUTO_REJECT_APPROVAL_PAYLOAD,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -231,7 +230,10 @@ describe('PermissionController', () => {
       'wf_2',
       'wfap_2',
       ToolConfirmationOutcome.Cancel,
-      AUTO_REJECT_APPROVAL_PAYLOAD,
+      {
+        cancelMessage:
+          'The host workflow approval request failed: Control request timeout',
+      },
     );
   });
 
@@ -270,7 +272,10 @@ describe('PermissionController', () => {
       'wf_aborted',
       'wfap_aborted',
       ToolConfirmationOutcome.Cancel,
-      AUTO_REJECT_APPROVAL_PAYLOAD,
+      {
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
+      },
     );
   });
 
@@ -404,7 +409,10 @@ describe('PermissionController', () => {
       'wf_cleared',
       'wfap_cleared',
       ToolConfirmationOutcome.Cancel,
-      AUTO_REJECT_APPROVAL_PAYLOAD,
+      {
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
+      },
     );
   });
 
@@ -442,7 +450,10 @@ describe('PermissionController', () => {
       'wf_text',
       'wfap_text',
       ToolConfirmationOutcome.Cancel,
-      AUTO_REJECT_APPROVAL_PAYLOAD,
+      {
+        cancelMessage:
+          'The host could not present the required approval for "read_file".',
+      },
     );
   });
 
@@ -570,101 +581,107 @@ describe('PermissionController', () => {
     });
   });
 
-  it('reports an aborted turn without blaming host interaction support', async () => {
-    const context = {
-      ...createContext(),
-      abortSignal: AbortSignal.abort(),
-    };
-    const controller = new PermissionController(
-      context,
-      createRegistry(),
-      'PermissionController',
-    );
-    const sendControlRequest = vi.spyOn(controller, 'sendControlRequest');
-    const onConfirm = vi.fn();
-
-    controller.getToolCallUpdateCallback()([
-      {
-        status: 'awaiting_approval',
-        request: {
-          callId: 'tool-call-question-aborted',
-          name: 'ask_user_question',
-          args: { questions: [] },
-        },
-        invocation: {
-          requiresUserInteraction: () => true,
-        },
-        confirmationDetails: {
-          type: 'ask_user_question',
-          title: 'Please answer',
-          onConfirm,
-        },
-      } as never,
-    ]);
-
-    await vi.waitFor(() => {
-      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
-        cancelMessage:
-          'The turn was cancelled before the approval could be answered.',
-      });
-    });
-    expect(sendControlRequest).not.toHaveBeenCalled();
-  });
-
-  it('reports an in-flight aborted turn without blaming host interaction support', async () => {
-    const abortController = new AbortController();
-    const context = {
-      ...createContext(),
-      abortSignal: abortController.signal,
-    };
-    const controller = new PermissionController(
-      context,
-      createRegistry(),
-      'PermissionController',
-    );
-    const sendControlRequest = vi
-      .spyOn(controller, 'sendControlRequest')
-      .mockImplementation(
-        (_payload, _timeout, signal) =>
-          new Promise((_, reject) => {
-            expect(signal?.aborted).toBe(false);
-            signal?.addEventListener(
-              'abort',
-              () => reject(new Error('Request aborted')),
-              { once: true },
-            );
-          }),
+  it.each([true, false])(
+    'reports an aborted turn without blaming host interaction support (interaction=%s)',
+    async (requiresUserInteraction) => {
+      const context = {
+        ...createContext(),
+        abortSignal: AbortSignal.abort(),
+      };
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
       );
-    const onConfirm = vi.fn();
+      const sendControlRequest = vi.spyOn(controller, 'sendControlRequest');
+      const onConfirm = vi.fn();
 
-    controller.getToolCallUpdateCallback()([
-      {
-        status: 'awaiting_approval',
-        request: {
-          callId: 'tool-call-question-in-flight-abort',
-          name: 'ask_user_question',
-          args: { questions: [] },
-        },
-        invocation: {
-          requiresUserInteraction: () => true,
-        },
-        confirmationDetails: {
-          type: 'ask_user_question',
-          title: 'Please answer',
-          onConfirm,
-        },
-      } as never,
-    ]);
+      controller.getToolCallUpdateCallback()([
+        {
+          status: 'awaiting_approval',
+          request: {
+            callId: 'tool-call-question-aborted',
+            name: 'ask_user_question',
+            args: { questions: [] },
+          },
+          invocation: {
+            requiresUserInteraction: () => requiresUserInteraction,
+          },
+          confirmationDetails: {
+            type: 'ask_user_question',
+            title: 'Please answer',
+            onConfirm,
+          },
+        } as never,
+      ]);
 
-    await vi.waitFor(() => expect(sendControlRequest).toHaveBeenCalled());
-    abortController.abort();
-    await vi.waitFor(() => {
-      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
-        cancelMessage:
-          'The turn was cancelled before the approval could be answered.',
+      await vi.waitFor(() => {
+        expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+          cancelMessage:
+            'The turn was cancelled before the approval could be answered.',
+        });
       });
-    });
-  });
+      expect(sendControlRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    'reports an in-flight aborted turn without blaming host interaction support (interaction=%s)',
+    async (requiresUserInteraction) => {
+      const abortController = new AbortController();
+      const context = {
+        ...createContext(),
+        abortSignal: abortController.signal,
+      };
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
+      );
+      const sendControlRequest = vi
+        .spyOn(controller, 'sendControlRequest')
+        .mockImplementation(
+          (_payload, _timeout, signal) =>
+            new Promise((_, reject) => {
+              signal?.addEventListener(
+                'abort',
+                () => reject(new Error('Request aborted')),
+                { once: true },
+              );
+            }),
+        );
+      const onConfirm = vi.fn();
+
+      controller.getToolCallUpdateCallback()([
+        {
+          status: 'awaiting_approval',
+          request: {
+            callId: 'tool-call-question-in-flight-abort',
+            name: 'ask_user_question',
+            args: { questions: [] },
+          },
+          invocation: {
+            requiresUserInteraction: () => requiresUserInteraction,
+          },
+          confirmationDetails: {
+            type: 'ask_user_question',
+            title: 'Please answer',
+            onConfirm,
+          },
+        } as never,
+      ]);
+
+      await vi.waitFor(() => expect(sendControlRequest).toHaveBeenCalled());
+      expect(sendControlRequest.mock.calls[0]?.[2]?.aborted).toBe(false);
+      abortController.abort();
+      await vi.waitFor(() => {
+        expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+          cancelMessage:
+            'The turn was cancelled before the approval could be answered.',
+        });
+      });
+    },
+  );
 
   it('uses SDK canUseTool timeout for outgoing permission requests', async () => {
     const context = createContext(120_000);
@@ -769,7 +786,8 @@ describe('PermissionController', () => {
     await vi.waitFor(() => {
       expect(requestSignal?.aborted).toBe(true);
       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
-        cancelMessage: 'Error: Request aborted',
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
       });
     });
     expect(secondTurn.signal.aborted).toBe(false);

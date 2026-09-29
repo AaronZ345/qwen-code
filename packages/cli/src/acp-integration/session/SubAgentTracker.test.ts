@@ -21,7 +21,6 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
-  AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
@@ -715,7 +714,10 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.Cancel,
-          AUTO_REJECT_APPROVAL_PAYLOAD,
+          {
+            cancelMessage:
+              'The host approval request for "test_tool" failed: Network error',
+          },
         );
       });
     });
@@ -806,7 +808,9 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.Cancel,
-          AUTO_REJECT_APPROVAL_PAYLOAD,
+          {
+            cancelMessage: `The host approval request for "shell" failed: Permission response selected unoffered option: ${ToolConfirmationOutcome.ProceedAlwaysProject}`,
+          },
         );
       });
     });
@@ -852,7 +856,9 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.Cancel,
-          AUTO_REJECT_APPROVAL_PAYLOAD,
+          {
+            cancelMessage: `The host approval request for "shell" failed: Permission response selected unoffered option: ${ToolConfirmationOutcome.ProceedAlwaysProject}`,
+          },
         );
       });
       const request = requestPermissionSpy.mock.calls[0]?.[0] as {
@@ -950,9 +956,9 @@ describe('SubAgentTracker', () => {
       );
     });
 
-    it('notifies when nested permission request fails', async () => {
+    it('retains the host failure when cancelling the parent turn', async () => {
       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
-      const onPermissionCancel = vi.fn();
+      const onPermissionCancel = vi.fn(() => abortController.abort());
       tracker = new SubAgentTracker(
         mockContext,
         mockClient,
@@ -975,7 +981,10 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.Cancel,
-          AUTO_REJECT_APPROVAL_PAYLOAD,
+          {
+            cancelMessage:
+              'The host approval request for "shell" failed: Network error',
+          },
         );
       });
       expect(onPermissionCancel).toHaveBeenCalledOnce();
@@ -1014,7 +1023,10 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.Cancel,
-          AUTO_REJECT_APPROVAL_PAYLOAD,
+          {
+            cancelMessage:
+              'The turn was cancelled before the approval could be answered.',
+          },
         );
       });
 
@@ -1046,10 +1058,10 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(onPermissionCancel).toHaveBeenCalledOnce();
       });
-      expect(respondSpy).toHaveBeenCalledWith(
-        ToolConfirmationOutcome.Cancel,
-        AUTO_REJECT_APPROVAL_PAYLOAD,
-      );
+      expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The host approval request for "shell" failed: Network error',
+      });
     });
 
     it('should forward answers payload from ACP permission responses', async () => {

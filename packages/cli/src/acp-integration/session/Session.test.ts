@@ -42637,7 +42637,10 @@ describe('Session', () => {
         await vi.waitFor(() => {
           expect(respond).toHaveBeenCalledWith(
             core.ToolConfirmationOutcome.Cancel,
-            core.AUTO_REJECT_APPROVAL_PAYLOAD,
+            {
+              cancelMessage:
+                'The turn was cancelled before the approval could be answered.',
+            },
           );
         });
         expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
