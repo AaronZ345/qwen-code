@@ -9,5 +9,62 @@
     "build_workspace": "packages/channels/dws",
     "message": "fix(dws): keep bounded diagnostics without leaking interrupted output",
     "files": ["packages/channels/dws/src/dws-client.ts", "packages/channels/dws/src/dws-client-process.test.ts", "packages/cli/vitest.config.ts"]
+  },
+  "10280": {
+    "package": "packages/core",
+    "tests": ["src/core/coreToolScheduler.test.ts"],
+    "red_file": "packages/core/src/core/coreToolScheduler.test.ts",
+    "red_pattern": "adds the stop directive after",
+    "red_evidence": "Stop and await further instructions",
+    "typecheck": "packages/core",
+    "build_workspace": "packages/core",
+    "message": "fix(core): preserve cancellation reasons without inventing user intent",
+    "files": ["packages/core/src/core/coreToolScheduler.ts", "packages/core/src/core/coreToolScheduler.test.ts", "packages/cli/vitest.config.ts"],
+    "additional_patches": ["10280-expected-output.patch"]
+  },
+  "9921": {
+    "package": "packages/cli",
+    "tests": ["src/nonInteractive/control/controllers/permissionController.test.ts", "src/acp-integration/session/SubAgentTracker.test.ts", "src/acp-integration/session/permissionUtils.test.ts", "src/acp-integration/session/Session.test.ts"],
+    "test_suites": [
+      {"package": "packages/cli", "tests": ["src/nonInteractive/control/controllers/permissionController.test.ts", "src/acp-integration/session/SubAgentTracker.test.ts", "src/acp-integration/session/permissionUtils.test.ts", "src/acp-integration/session/Session.test.ts"]},
+      {"package": "packages/core", "tests": ["src/agents/workflow-run-registry.test.ts"]},
+      {"package": "packages/web-shell", "tests": ["client/components/MessageList.dom.test.tsx", "client/components/TranscriptViewport.scroll.test.tsx", "client/components/artifacts/TrajectoryPanel.test.tsx"]}
+    ],
+    "red_file": "packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts",
+    "red_pattern": "reports an aborted turn without blaming host interaction support",
+    "red_evidence": "The turn was cancelled before the approval could be answered",
+    "typecheck": "packages/cli",
+    "build_workspace": "packages/cli",
+    "message": "fix(tools): preserve automatic approval failure causes and narrow PR scope",
+    "files": [
+      "packages/cli/src/acp-integration/session/SubAgentTracker.ts",
+      "packages/cli/src/acp-integration/session/SubAgentTracker.test.ts",
+      "packages/cli/src/nonInteractive/control/controllers/permissionController.ts",
+      "packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts",
+      "packages/cli/vitest.config.ts",
+      "packages/vscode-ide-companion/NOTICES.txt",
+      "packages/web-shell/client/components/MessageList.dom.test.tsx",
+      "packages/web-shell/client/components/MessageList.tsx",
+      "packages/web-shell/client/components/TranscriptViewport.scroll.test.tsx",
+      "packages/web-shell/client/components/TranscriptViewport.tsx",
+      "packages/web-shell/client/components/artifacts/TrajectoryPanel.test.tsx",
+      "pnpm-lock.yaml"
+    ],
+    "format_files": [
+      "packages/cli/src/acp-integration/session/SubAgentTracker.ts",
+      "packages/cli/src/acp-integration/session/SubAgentTracker.test.ts",
+      "packages/cli/src/nonInteractive/control/controllers/permissionController.ts",
+      "packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts"
+    ],
+    "revert_pr_files": [
+      "packages/cli/vitest.config.ts",
+      "packages/vscode-ide-companion/NOTICES.txt",
+      "packages/web-shell/client/components/MessageList.dom.test.tsx",
+      "packages/web-shell/client/components/MessageList.tsx",
+      "packages/web-shell/client/components/TranscriptViewport.scroll.test.tsx",
+      "packages/web-shell/client/components/TranscriptViewport.tsx",
+      "packages/web-shell/client/components/artifacts/TrajectoryPanel.test.tsx",
+      "pnpm-lock.yaml"
+    ]
   }
 }
