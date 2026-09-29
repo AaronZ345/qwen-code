@@ -12,29 +12,17 @@ permissions:
 
 jobs:
   repair:
-    name: Verify PR ${{ matrix.pr }}
+    name: Verify PR 10279
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - pr: '10251'
-            head: 478a913d184bc60183de320117908ae998cbfbd0
-            branch: fix/10239-publish-assets-self-guard
-            patch: 026bee18ca60e65f092124d2955039f405c3bc44
-          - pr: '10280'
-            head: d904473895e59e4e52559c77d92f03cd04c498e6
-            branch: fix/10170-esc-cancel-stop
-            patch: 4acaeda1f1822ef135443a87d4c6c08d00167951
     env:
       GH_TOKEN: ${{ github.token }}
       NO_COLOR: '1'
       TERM: dumb
-      EXPECTED_HEAD: ${{ matrix.head }}
-      HEAD_BRANCH: ${{ matrix.branch }}
-      PR_NUMBER: ${{ matrix.pr }}
-      PATCH_BLOB: ${{ matrix.patch }}
+      EXPECTED_HEAD: adce346cad83ac768a1cbafded225b1d4ce98a70
+      HEAD_BRANCH: fix/10276-dws-error-detail
+      PR_NUMBER: '10279'
+      PATCH_BLOB: 4dfc29efa05465a23816b765d7c9ed4ecd2329f6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,7 +39,7 @@ jobs:
         run: python3 control/_maintenance/verify.py red
       - name: Apply and format the implementation repair
         run: python3 control/_maintenance/verify.py fix
-      - name: Build and type-check
+      - name: Build the affected package
         run: python3 control/_maintenance/verify.py build
       - name: Run regression suites and lint
         run: python3 control/_maintenance/verify.py green
@@ -60,6 +48,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pr-repair-${{ matrix.pr }}
+          name: pr-repair-10279
           path: ${{ runner.temp }}/repair-result/
           retention-days: 1
