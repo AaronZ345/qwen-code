@@ -1,0 +1,103 @@
+name: PR maintenance merge probe
+
+on:
+  push:
+    branches:
+      - repair/pr-maintenance-20260929
+    paths:
+      - .github/workflows/pr-maintenance-merge-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Inspect three-way merges against current upstream heads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'merge-probe'
+          output.mkdir()
+          targets = {
+              'QwenLM/qwen-code': [9541, 9921, 10251, 10280, 10279],
+              'chenhg5/cc-connect': [1801, 1817, 1816, 1800, 1886],
+              'agentscope-ai/QwenPaw': [6874],
+              'volcengine/OpenViking': [3504, 4396],
+          }
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+          report = {}
+          for repo, numbers in targets.items():
+              directory = output / repo.replace('/', '__')
+              directory.mkdir()
+              work = pathlib.Path(tempfile.mkdtemp(prefix='merge-probe-'))
+              def git(*args):
+                  return subprocess.check_output(['git', '-C', str(work), *args], text=True).strip()
+              git('init', '--quiet')
+              git('remote', 'add', 'origin', 'https://github.com/' + repo + '.git')
+              default = api('repos/' + repo)['default_branch']
+              git('fetch', '--quiet', '--no-tags', '--depth=1', 'origin', default)
+              upstream = git('rev-parse', 'FETCH_HEAD')
+              state = {'upstream': upstream, 'default_branch': default, 'prs': {}}
+              for number in numbers:
+                  pr = api(f'repos/{repo}/pulls/{number}')
+                  assert pr['user']['login'].lower() == 'aaronz345'
+                  if pr['state'] != 'open':
+                      state['prs'][str(number)] = {'state': pr['state']}
+                      continue
+                  head = pr['head']['sha']
+                  prefix = directory / str(number)
+                  prefix.mkdir()
+                  (prefix / 'pr.json').write_text(json.dumps(pr, indent=2))
+                  compare = api(f'repos/{repo}/compare/{upstream}...{head}')
+                  base = compare['merge_base_commit']['sha']
+                  git('fetch', '--quiet', '--no-tags', '--depth=1', 'origin', f'refs/pull/{number}/head')
+                  assert git('rev-parse', 'FETCH_HEAD') == head, 'PR changed during inspection'
+                  git('fetch', '--quiet', '--no-tags', '--depth=1', 'origin', base)
+                  merged = subprocess.run(['git', '-C', str(work), 'merge-tree', '--write-tree', '--name-only', '--merge-base=' + base, head, upstream], text=True, capture_output=True)
+                  assert merged.returncode in (0, 1), merged.stderr
+                  (prefix / 'merge-output.txt').write_text(merged.stdout + merged.stderr)
+                  lines = merged.stdout.splitlines()
+                  tree = lines[0]
+                  assert len(tree) == 40
+                  paths = []
+                  if merged.returncode:
+                      for line in lines[1:]:
+                          if not line:
+                              break
+                          paths.append(line)
+                  for path in paths:
+                      destination = prefix / 'conflicts' / path
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      for label, ref in [('head', head), ('base', base), ('upstream', upstream), ('merged', tree)]:
+                          result = subprocess.run(['git', '-C', str(work), 'show', ref + ':' + path], capture_output=True)
+                          if result.returncode == 0:
+                              destination.with_name(destination.name + '.' + label).write_bytes(result.stdout)
+                  state['prs'][str(number)] = {
+                      'head': head, 'base': base, 'tree': tree,
+                      'clean': merged.returncode == 0, 'conflicts': paths,
+                      'head_branch': pr['head']['ref'],
+                      'head_repo': pr['head']['repo']['full_name'],
+                  }
+                  print(repo, number, 'clean' if merged.returncode == 0 else paths, flush=True)
+              report[repo] = state
+          (output / 'report.json').write_text(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: current-upstream-merge-probe
+          path: ${{ runner.temp }}/merge-probe/
+          retention-days: 1
