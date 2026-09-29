@@ -1,0 +1,335 @@
+diff --git a/packages/cli/src/acp-integration/session/SubAgentTracker.test.ts b/packages/cli/src/acp-integration/session/SubAgentTracker.test.ts
+index b555bbc..94df42c 100644
+--- a/packages/cli/src/acp-integration/session/SubAgentTracker.test.ts
++++ b/packages/cli/src/acp-integration/session/SubAgentTracker.test.ts
+@@ -21,7 +21,6 @@ import type {
+ } from '@qwen-code/qwen-code-core';
+ import {
+   AgentEventType,
+-  AUTO_REJECT_APPROVAL_PAYLOAD,
+   ToolConfirmationOutcome,
+   ToolNames,
+ } from '@qwen-code/qwen-code-core';
+@@ -715,7 +714,7 @@ describe('SubAgentTracker', () => {
+       await vi.waitFor(() => {
+         expect(respondSpy).toHaveBeenCalledWith(
+           ToolConfirmationOutcome.Cancel,
+-          AUTO_REJECT_APPROVAL_PAYLOAD,
++          { cancelMessage: 'The host approval request for "test_tool" failed: Network error' },
+         );
+       });
+     });
+@@ -806,7 +805,7 @@ describe('SubAgentTracker', () => {
+       await vi.waitFor(() => {
+         expect(respondSpy).toHaveBeenCalledWith(
+           ToolConfirmationOutcome.Cancel,
+-          AUTO_REJECT_APPROVAL_PAYLOAD,
++          { cancelMessage: `The host approval request for "shell" failed: Permission response selected unoffered option: ${ToolConfirmationOutcome.ProceedAlwaysProject}` },
+         );
+       });
+     });
+@@ -852,7 +851,7 @@ describe('SubAgentTracker', () => {
+       await vi.waitFor(() => {
+         expect(respondSpy).toHaveBeenCalledWith(
+           ToolConfirmationOutcome.Cancel,
+-          AUTO_REJECT_APPROVAL_PAYLOAD,
++          { cancelMessage: `The host approval request for "shell" failed: Permission response selected unoffered option: ${ToolConfirmationOutcome.ProceedAlwaysProject}` },
+         );
+       });
+       const request = requestPermissionSpy.mock.calls[0]?.[0] as {
+@@ -950,9 +949,9 @@ describe('SubAgentTracker', () => {
+       );
+     });
+ 
+-    it('notifies when nested permission request fails', async () => {
++    it('retains the host failure when cancelling the parent turn', async () => {
+       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
+-      const onPermissionCancel = vi.fn();
++      const onPermissionCancel = vi.fn(() => abortController.abort());
+       tracker = new SubAgentTracker(
+         mockContext,
+         mockClient,
+@@ -975,7 +974,7 @@ describe('SubAgentTracker', () => {
+       await vi.waitFor(() => {
+         expect(respondSpy).toHaveBeenCalledWith(
+           ToolConfirmationOutcome.Cancel,
+-          AUTO_REJECT_APPROVAL_PAYLOAD,
++          { cancelMessage: 'The host approval request for "shell" failed: Network error' },
+         );
+       });
+       expect(onPermissionCancel).toHaveBeenCalledOnce();
+@@ -1014,7 +1013,7 @@ describe('SubAgentTracker', () => {
+       await vi.waitFor(() => {
+         expect(respondSpy).toHaveBeenCalledWith(
+           ToolConfirmationOutcome.Cancel,
+-          AUTO_REJECT_APPROVAL_PAYLOAD,
++          { cancelMessage: 'The turn was cancelled before the approval could be answered.' },
+         );
+       });
+ 
+@@ -1048,7 +1047,7 @@ describe('SubAgentTracker', () => {
+       });
+       expect(respondSpy).toHaveBeenCalledWith(
+         ToolConfirmationOutcome.Cancel,
+-        AUTO_REJECT_APPROVAL_PAYLOAD,
++        { cancelMessage: 'The host approval request for "shell" failed: Network error' },
+       );
+     });
+ 
+diff --git a/packages/cli/src/acp-integration/session/SubAgentTracker.ts b/packages/cli/src/acp-integration/session/SubAgentTracker.ts
+index 9095999..b41fa03 100644
+--- a/packages/cli/src/acp-integration/session/SubAgentTracker.ts
++++ b/packages/cli/src/acp-integration/session/SubAgentTracker.ts
+@@ -19,7 +19,6 @@ import type {
+ 
+ import {
+   AgentEventType,
+-  AUTO_REJECT_APPROVAL_PAYLOAD,
+   ToolConfirmationOutcome,
+   createDebugLogger,
+ } from '@qwen-code/qwen-code-core';
+@@ -336,14 +335,14 @@ export class SubAgentTracker {
+         // Fail closed: if the client cannot answer a nested permission
+         // request, stop the parent turn instead of letting later tools run
+         // without the required user input.
++        const cancelMessage = abortSignal.aborted
++          ? 'The turn was cancelled before the approval could be answered.'
++          : `The host approval request for "${event.name}" failed: ${error instanceof Error ? error.message : String(error)}`;
+         if (!abortSignal.aborted) {
+           this.onPermissionCancel?.();
+         }
+         try {
+-          await event.respond(
+-            ToolConfirmationOutcome.Cancel,
+-            AUTO_REJECT_APPROVAL_PAYLOAD,
+-          );
++          await event.respond(ToolConfirmationOutcome.Cancel, { cancelMessage });
+         } catch (respondError) {
+           debugLogger.error(
+             `Failed to cancel subagent tool ${event.name} after permission request failure:`,
+diff --git a/packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts b/packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts
+index 5e884d1..55330e5 100644
+--- a/packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts
++++ b/packages/cli/src/nonInteractive/control/controllers/permissionController.test.ts
+@@ -7,7 +7,6 @@
+ import { describe, expect, it, vi } from 'vitest';
+ import {
+   ApprovalMode,
+-  AUTO_REJECT_APPROVAL_PAYLOAD,
+   InputFormat,
+   ToolConfirmationOutcome,
+ } from '@qwen-code/qwen-code-core';
+@@ -231,7 +230,7 @@ describe('PermissionController', () => {
+       'wf_2',
+       'wfap_2',
+       ToolConfirmationOutcome.Cancel,
+-      AUTO_REJECT_APPROVAL_PAYLOAD,
++      { cancelMessage: 'The host workflow approval request failed: Control request timeout' },
+     );
+   });
+ 
+@@ -270,7 +269,7 @@ describe('PermissionController', () => {
+       'wf_aborted',
+       'wfap_aborted',
+       ToolConfirmationOutcome.Cancel,
+-      AUTO_REJECT_APPROVAL_PAYLOAD,
++      { cancelMessage: 'The turn was cancelled before the approval could be answered.' },
+     );
+   });
+ 
+@@ -404,7 +403,7 @@ describe('PermissionController', () => {
+       'wf_cleared',
+       'wfap_cleared',
+       ToolConfirmationOutcome.Cancel,
+-      AUTO_REJECT_APPROVAL_PAYLOAD,
++      { cancelMessage: 'The turn was cancelled before the approval could be answered.' },
+     );
+   });
+ 
+@@ -442,7 +441,7 @@ describe('PermissionController', () => {
+       'wf_text',
+       'wfap_text',
+       ToolConfirmationOutcome.Cancel,
+-      AUTO_REJECT_APPROVAL_PAYLOAD,
++      { cancelMessage: 'The host could not present the required approval for "read_file".' },
+     );
+   });
+ 
+@@ -570,7 +569,7 @@ describe('PermissionController', () => {
+     });
+   });
+ 
+-  it('reports an aborted turn without blaming host interaction support', async () => {
++  it.each([true, false])('reports an aborted turn without blaming host interaction support (interaction=%s)', async (requiresUserInteraction) => {
+     const context = {
+       ...createContext(),
+       abortSignal: AbortSignal.abort(),
+@@ -592,7 +591,7 @@ describe('PermissionController', () => {
+           args: { questions: [] },
+         },
+         invocation: {
+-          requiresUserInteraction: () => true,
++          requiresUserInteraction: () => requiresUserInteraction,
+         },
+         confirmationDetails: {
+           type: 'ask_user_question',
+@@ -611,7 +610,7 @@ describe('PermissionController', () => {
+     expect(sendControlRequest).not.toHaveBeenCalled();
+   });
+ 
+-  it('reports an in-flight aborted turn without blaming host interaction support', async () => {
++  it.each([true, false])('reports an in-flight aborted turn without blaming host interaction support (interaction=%s)', async (requiresUserInteraction) => {
+     const abortController = new AbortController();
+     const context = {
+       ...createContext(),
+@@ -627,7 +626,6 @@ describe('PermissionController', () => {
+       .mockImplementation(
+         (_payload, _timeout, signal) =>
+           new Promise((_, reject) => {
+-            expect(signal?.aborted).toBe(false);
+             signal?.addEventListener(
+               'abort',
+               () => reject(new Error('Request aborted')),
+@@ -646,7 +644,7 @@ describe('PermissionController', () => {
+           args: { questions: [] },
+         },
+         invocation: {
+-          requiresUserInteraction: () => true,
++          requiresUserInteraction: () => requiresUserInteraction,
+         },
+         confirmationDetails: {
+           type: 'ask_user_question',
+@@ -657,6 +655,7 @@ describe('PermissionController', () => {
+     ]);
+ 
+     await vi.waitFor(() => expect(sendControlRequest).toHaveBeenCalled());
++    expect(sendControlRequest.mock.calls[0]?.[2]?.aborted).toBe(false);
+     abortController.abort();
+     await vi.waitFor(() => {
+       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+@@ -769,7 +768,7 @@ describe('PermissionController', () => {
+     await vi.waitFor(() => {
+       expect(requestSignal?.aborted).toBe(true);
+       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+-        cancelMessage: 'Error: Request aborted',
++        cancelMessage: 'The turn was cancelled before the approval could be answered.',
+       });
+     });
+     expect(secondTurn.signal.aborted).toBe(false);
+diff --git a/packages/cli/src/nonInteractive/control/controllers/permissionController.ts b/packages/cli/src/nonInteractive/control/controllers/permissionController.ts
+index de58be7..fcab8b8 100644
+--- a/packages/cli/src/nonInteractive/control/controllers/permissionController.ts
++++ b/packages/cli/src/nonInteractive/control/controllers/permissionController.ts
+@@ -17,16 +17,11 @@
+ import type { TeammateApprovalRequestEvent } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+ import type { WorkflowApproval } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+ import type { WaitingToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+-import type {
+-  ToolExecuteConfirmationDetails,
+-  ToolMcpConfirmationDetails,
+-  ToolConfirmationPayload,
+-} from '@qwen-code/qwen-code-core/tools/tools.js';
++import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
+ import {
+   ApprovalMode,
+   APPROVAL_MODES,
+ } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+-import { AUTO_REJECT_APPROVAL_PAYLOAD } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+ import { InputFormat } from '@qwen-code/qwen-code-core/output/types.js';
+ import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+ import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+@@ -449,7 +444,7 @@ export class PermissionController extends BaseController {
+         runId,
+         approval.approvalId,
+         ToolConfirmationOutcome.Cancel,
+-        AUTO_REJECT_APPROVAL_PAYLOAD,
++        { cancelMessage: ABORTED_TURN_CANCEL_MESSAGE },
+       );
+       return;
+     }
+@@ -459,7 +454,7 @@ export class PermissionController extends BaseController {
+         runId,
+         approval.approvalId,
+         ToolConfirmationOutcome.Cancel,
+-        AUTO_REJECT_APPROVAL_PAYLOAD,
++        { cancelMessage: this.getInteractionUnavailableMessage(approval.name) },
+       );
+       return;
+     }
+@@ -508,7 +503,11 @@ export class PermissionController extends BaseController {
+         runId,
+         approval.approvalId,
+         ToolConfirmationOutcome.Cancel,
+-        AUTO_REJECT_APPROVAL_PAYLOAD,
++        {
++          cancelMessage: signal.aborted
++            ? ABORTED_TURN_CANCEL_MESSAGE
++            : `The host workflow approval request failed: ${error instanceof Error ? error.message : String(error)}`,
++        },
+       );
+     }
+   }
+@@ -534,11 +533,7 @@ export class PermissionController extends BaseController {
+       if (signal.aborted) {
+         await toolCall.confirmationDetails.onConfirm(
+           ToolConfirmationOutcome.Cancel,
+-          requiresUserInteraction
+-            ? {
+-                cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
+-              }
+-            : undefined,
++          { cancelMessage: ABORTED_TURN_CANCEL_MESSAGE },
+         );
+         return;
+       }
+@@ -658,42 +653,16 @@ export class PermissionController extends BaseController {
+         error,
+       );
+ 
+-      // Extract error message
+       const errorMessage =
+         error instanceof Error ? error.message : String(error);
+-
+-      // On error, pass error message as cancel message
+-      // Only pass payload for exec and mcp types that support it
+-      const confirmationType = toolCall.confirmationDetails.type;
+-      if (signal.aborted && requiresUserInteraction) {
+-        await toolCall.confirmationDetails.onConfirm(
+-          ToolConfirmationOutcome.Cancel,
+-          {
+-            cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
+-          },
+-        );
+-      } else if (requiresUserInteraction) {
+-        await toolCall.confirmationDetails.onConfirm(
+-          ToolConfirmationOutcome.Cancel,
+-          {
+-            cancelMessage: interactionUnavailableMessage,
+-          },
+-        );
+-      } else if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
+-        const execOrMcpDetails = toolCall.confirmationDetails as
+-          | ToolExecuteConfirmationDetails
+-          | ToolMcpConfirmationDetails;
+-        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
+-          cancelMessage: `Error: ${errorMessage}`,
+-        });
+-      } else {
+-        await toolCall.confirmationDetails.onConfirm(
+-          ToolConfirmationOutcome.Cancel,
+-          {
+-            cancelMessage: `Error: ${errorMessage}`,
+-          },
+-        );
+-      }
++      await toolCall.confirmationDetails.onConfirm(
++        ToolConfirmationOutcome.Cancel,
++        {
++          cancelMessage: signal.aborted
++            ? ABORTED_TURN_CANCEL_MESSAGE
++            : `The host approval request for "${toolCall.request.name}" failed: ${errorMessage}`,
++        },
++      );
+     } finally {
+       this.pendingOutgoingRequests.delete(toolCall.request.callId);
+     }
